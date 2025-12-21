@@ -18,15 +18,19 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y openvpn openvpn-systemd-resolved
 
-    # 2. Подключаемся к VPN (используя ваши секреты)
+    # 2. СОЗДАЕМ ФАЙЛ (Вот этого шага не хватало)
+    - name: Create VPN config file
+      run: echo "${{ secrets.VPN_CONFIG }}" > vpn_config.ovpn
+
+    # 3. Подключаемся к VPN (теперь указываем путь к созданному файлу)
     - name: Connect to VPN
       uses: "kota65535/github-openvpn-connect-action@v2"
       with:
-        config_file: ${{ secrets.VPN_CONFIG }}
+        config_file: vpn_config.ovpn
         username: ${{ secrets.VPN_USER }}
         password: ${{ secrets.VPN_PASS }}
 
-    # 3. Проверка (для логов): Действительно ли мы в Украине?
+    # 4. Проверка IP (Убеждаемся, что мы в Украине)
     - name: Check IP
       run: |
         echo "Мой новый IP:"
@@ -41,7 +45,7 @@ jobs:
     - name: Install dependencies
       run: npm install
 
-    # 4. Запускаем бота
+    # 5. Запускаем бота
     - name: Run Bot
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
