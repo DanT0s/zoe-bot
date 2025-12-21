@@ -1,105 +1,102 @@
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
-const { HttpsProxyAgent } = require('https-proxy-agent');
+const fs = require('fs');
 
+// Секреты из настроек GitHub
 const TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const ZOE_URL = "https://www.zoe.com.ua/wp-json/wp/v2/pages/371392";
 
-// === ГІБРИДНИЙ СПИСОК (Веб-дзеркала + IP проксі) ===
-const STRATEGIES = [
-    // 1. WEB PROXY (Найбільш надійні для хмари)
-    { type: 'web', url: `https://corsproxy.io/?${ZOE_URL}` },
-    { type: 'web', url: `https://api.allorigins.win/raw?url=${encodeURIComponent(ZOE_URL)}` },
-    { type: 'web', url: `https://proxy.corsfix.com/?${ZOE_URL}`, headers: { 'Origin': 'http://localhost' } },
-    
-    // 2. ВАШІ IP ПРОКСІ (Сюди треба вставляти СВІЖІ)
-    // Якщо старі не працюють - замініть їх новими з spys.one
-    { type: 'ip', url: 'http://91.225.110.110:8080' }, 
-    { type: 'ip', url: 'http://193.25.121.222:80' },
+// === СПИСОК ВЕБ-ПРОКСИ (ЗЕРКАЛ) ===
+// Мы пробуем их все по очереди. Хоть один должен пробить защиту.
+const WEB_PROXIES = [
+    `https://corsproxy.io/?${ZOE_URL}`,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(ZOE_URL)}`,
+    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(ZOE_URL)}`,
+    `https://thingproxy.freeboard.io/fetch/${ZOE_URL}`,
+    `https://proxy.corsfix.com/?${ZOE_URL}`,
+    `https://api.chproxy.org/get?url=${encodeURIComponent(ZOE_URL)}` // Часто работает
 ];
 
 const bot = new TelegramBot(TOKEN, { polling: false });
 
 async function run() {
-    console.log("🚀 ЗАПУСК БОТА (HYBRID MODE)...");
+    console.log("🚀 ЗАПУСК ПРОВЕРКИ (5 МИНУТ)...");
     let jsonString = null;
     const timeParam = Date.now();
 
-    for (let strategy of STRATEGIES) {
+    // Перемешиваем прокси, чтобы не долбить всегда первый
+    const shuffledProxies = WEB_PROXIES.sort(() => Math.random() - 0.5);
+
+    for (let url of shuffledProxies) {
         try {
-            console.log(`🔄 Пробую: ${strategy.type === 'web' ? 'WEB ' + strategy.url.substring(0, 30)+'...' : 'IP ' + strategy.url}...`);
+            // Добавляем анти-кеш
+            const target = url.includes('?') ? `${url}&t=${timeParam}` : `${url}?t=${timeParam}`;
+            console.log(`🔄 Пробую зеркало: ${target.substring(0, 40)}...`);
 
-            const config = {
-                timeout: 8000, // Чекаємо 8 секунд
-                headers: { 
+            const response = await axios.get(target, {
+                timeout: 6000, // Ждем 6 секунд, если висит - идем дальше
+                headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
-                    ...(strategy.headers || {}) // Додаємо спец. заголовки якщо треба
+                    'Origin': 'http://localhost' // Нужно для некоторых прокси
                 }
-            };
-
-            let response;
-
-            if (strategy.type === 'web') {
-                // Для веб-проксі просто робимо запит на URL
-                response = await axios.get(strategy.url + "&t=" + timeParam, config);
-            } else {
-                // Для IP проксі підключаємо агент
-                config.httpsAgent = new HttpsProxyAgent(strategy.url);
-                config.proxy = false;
-                response = await axios.get(ZOE_URL + "?t=" + timeParam, config);
-            }
+            });
 
             if (response.status === 200) {
                 const data = response.data;
-                // Перевірка, що прийшов не HTML-помилка, а дані
-                let contentToCheck = typeof data === 'object' ? JSON.stringify(data) : data;
+                // Проверяем, что это тот самый JSON
+                const contentStr = typeof data === 'object' ? JSON.stringify(data) : data;
                 
-                if (contentToCheck.includes('content') && contentToCheck.includes('rendered')) {
-                    console.log("✅ УСПІХ! Дані отримано.");
-                    jsonString = contentToCheck;
-                    break; // Виходимо з циклу
+                if (contentStr.includes('content') && contentStr.includes('rendered')) {
+                    console.log("✅ УСПЕХ! Данные скачаны.");
+                    jsonString = contentStr;
+                    break; // Выходим из цикла, победа!
                 }
             }
         } catch (e) {
-            console.log(`❌ Невдача: ${e.message}`);
+            console.log(`⚠️ Не сработал: ${e.message}`);
         }
     }
 
     if (!jsonString) {
-        console.log("💀 Всі методи (Web та IP) не спрацювали.");
+        console.log("💀 Все зеркала молчат или заблокированы.");
         return;
     }
 
-    // === ОБРОБКА ===
+    // === ПАРСИНГ ===
     try {
-        // Якщо прийшов JSON як рядок - парсимо
-        const jsonData = typeof jsonString === 'string' ? JSON.parse(jsonString) : jsonString;
-        
+        const jsonData = JSON.parse(jsonString);
         let rawHtml = "";
-        // Деякі проксі (AllOrigins) можуть повертати JSON у JSON
+
+        // Некоторые прокси (AllOrigins) возвращают JSON внутри JSON
         if (jsonData.contents) {
-             rawHtml = JSON.parse(jsonData.contents).content.rendered;
+            try { rawHtml = JSON.parse(jsonData.contents).content.rendered; } catch(e) { rawHtml = jsonData.content.rendered; }
         } else {
-             rawHtml = jsonData.content.rendered;
+            rawHtml = jsonData.content.rendered;
         }
 
         const plainText = convertHtmlToText(rawHtml);
         const cleanMessage = extractOneScheduleBlock(plainText);
 
         if (cleanMessage.length > 10) {
-            console.log("🔥 Графік знайдено! Відправляю...");
+            // Чтобы не спамить каждые 5 минут одним и тем же, 
+            // GitHub Actions сложно хранить состояние, но мы можем отправлять 
+            // только если в заголовке есть "ОНОВЛЕНО" или просто слать всегда, 
+            // а вы в ТГ выключите звук.
+            
+            // Но лучше всего - просто отправлять.
+            console.log("🔥 График есть. Отправка...");
             await bot.sendMessage(CHAT_ID, cleanMessage, { parse_mode: 'HTML', disable_web_page_preview: true });
         } else {
-            console.log("⚠️ Графік порожній.");
+            console.log("⚠️ График не найден (пустой фильтр).");
         }
 
     } catch (e) {
-        console.error("Помилка парсингу:", e);
+        console.error("Ошибка обработки:", e);
     }
 }
 
-// === УТИЛІТИ ===
+// === УТИЛИТЫ ===
 function extractOneScheduleBlock(text) {
     const lines = text.split('\n');
     let bestHeader = ""; 
@@ -111,7 +108,7 @@ function extractOneScheduleBlock(text) {
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
         if (line.length < 3) continue;
-        if (dateRegex.test(line) && (line.includes("ГПВ") || line.toUpperCase().includes("ОНОВЛЕНО") || line.toUpperCase().includes("ГРАФІК"))) {
+        if (dateRegex.test(line) && (line.includes("ГПВ") || line.toUpperCase().includes("ОНОВЛЕНО") || line.toUpperCase().includes("ГРАФІК") || line.toUpperCase().includes("ДІЯТИМУТЬ"))) {
              if (line.includes("Орієнтовна схема")) continue;
              if (queuesFound) break; 
              if (bestHeader === "" || (isUpperCase(line) && !isUpperCase(bestHeader))) bestHeader = line;
