@@ -2,7 +2,7 @@ name: Check ZOE via VPN
 
 on:
   schedule:
-    - cron: '*/3 * * * *' # Кожні 5 хвилин
+    - cron: '*/3 * * * *' # Каждые 5 минут
   workflow_dispatch:
 
 jobs:
@@ -12,38 +12,31 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
-    # 1. Відновлюємо пам'ять (щоб не спамити)
+    # 1. ВОССТАНАВЛИВАЕМ ПАМЯТЬ (ХЕШ)
     - name: Restore Previous Hash
       uses: actions/cache@v3
       with:
         path: last_hash.txt
+        # Ключ зависит от времени, но restore-keys позволяет брать последний доступный
         key: zoe-hash-${{ github.run_id }}
         restore-keys: |
           zoe-hash-
 
-    # 2. Встановлюємо OpenVPN
+    # 2. Устанавливаем VPN
     - name: Install OpenVPN
       run: |
         sudo apt-get update
         sudo apt-get install -y openvpn openvpn-systemd-resolved
 
-    # 3. Створюємо файл конфігурації із Секрету
     - name: Create VPN config file
       run: echo "${{ secrets.VPN_CONFIG }}" > vpn_config.ovpn
 
-    # 4. Підключаємося (БЕЗ логіна та пароля)
     - name: Connect to VPN
       uses: "kota65535/github-openvpn-connect-action@v2"
       with:
         config_file: vpn_config.ovpn
-        # Рядки username та password видалені, бо вони не потрібні
-
-    # 5. Перевірка IP (Чи ми в Україні?)
-    - name: Check IP
-      run: |
-        echo "My New IP:"
-        curl ifconfig.me
-        echo " "
+        username: ${{ secrets.VPN_USER }}
+        password: ${{ secrets.VPN_PASS }}
 
     - name: Setup Node.js
       uses: actions/setup-node@v2
@@ -53,14 +46,15 @@ jobs:
     - name: Install dependencies
       run: npm install
 
-    # 6. Запускаємо бота
+    # 3. ЗАПУСКАЕМ БОТА (Он прочитает и обновит last_hash.txt)
     - name: Run Bot
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
       run: node index.js
 
-    # 7. Зберігаємо пам'ять
+    # 4. СОХРАНЯЕМ ПАМЯТЬ ДЛЯ СЛЕДУЮЩЕГО РАЗА
+    # (Делаем это даже если бот упал с ошибкой, чтобы не терять прогресс)
     - name: Save Hash
       if: always()
       uses: actions/cache@v3
