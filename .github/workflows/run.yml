@@ -1,9 +1,9 @@
-name: Check ZOE
+name: Check ZOE via VPN
 
 on:
   schedule:
     - cron: '*/5 * * * *' # Запуск каждые 5 минут
-  workflow_dispatch: # Кнопка для ручного запуска
+  workflow_dispatch: # Кнопка ручного запуска
 
 jobs:
   build:
@@ -11,6 +11,27 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+
+    # 1. Устанавливаем OpenVPN
+    - name: Install OpenVPN
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y openvpn openvpn-systemd-resolved
+
+    # 2. Подключаемся к VPN (используя ваши секреты)
+    - name: Connect to VPN
+      uses: "kota65535/github-openvpn-connect-action@v2"
+      with:
+        config_file: ${{ secrets.VPN_CONFIG }}
+        username: ${{ secrets.VPN_USER }}
+        password: ${{ secrets.VPN_PASS }}
+
+    # 3. Проверка (для логов): Действительно ли мы в Украине?
+    - name: Check IP
+      run: |
+        echo "Мой новый IP:"
+        curl ifconfig.me
+        echo " "
 
     - name: Setup Node.js
       uses: actions/setup-node@v2
@@ -20,6 +41,7 @@ jobs:
     - name: Install dependencies
       run: npm install
 
+    # 4. Запускаем бота
     - name: Run Bot
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
