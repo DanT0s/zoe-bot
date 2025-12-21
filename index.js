@@ -1,5 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
+const https = require('https'); // Добавили библиотеку для настройки SSL
 
 const TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
@@ -7,13 +8,18 @@ const ZOE_URL = "https://www.zoe.com.ua/wp-json/wp/v2/pages/371392";
 
 const bot = new TelegramBot(TOKEN, { polling: false });
 
+// Создаем агент, который ИГНОРИРУЕТ ошибки сертификата (нужно для VPN)
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: false
+});
+
 async function run() {
-    console.log("🚀 Запуск бота через VPN...");
+    console.log("🚀 Запуск бота через VPN (SSL Ignored)...");
     
     try {
-        // Запрос НАПРЯМУЮ (теперь это сработает, так как мы под VPN)
         const response = await axios.get(ZOE_URL + "?t=" + Date.now(), {
             timeout: 20000,
+            httpsAgent: httpsAgent, // Подключаем наш "слепой" агент
             headers: { 
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36' 
             }
@@ -31,7 +37,6 @@ async function run() {
 
             if (cleanMessage.length > 10) {
                 console.log("🔥 График получен. Отправляю...");
-                // Можно добавить проверку хеша, чтобы не спамить, но пока шлем так
                 await bot.sendMessage(CHAT_ID, cleanMessage, { parse_mode: 'HTML', disable_web_page_preview: true });
             } else {
                 console.log("⚠️ График не найден (пустой фильтр).");
