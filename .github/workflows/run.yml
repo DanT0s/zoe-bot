@@ -1,20 +1,18 @@
-name: Check ZOE (Marathon Mode)
+name: Check ZOE via VPN (TCP)
 
 on:
   schedule:
-    # Запуск каждые 5 часов (в 0:00, 5:00, 10:00 и т.д.)
-    - cron: '0 */5 * * *' 
-  workflow_dispatch: # Кнопка ручного запуска
+    - cron: '*/5 * * * *' # Каждые 5 минут
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Ставим тайм-аут 350 минут (чуть меньше 6 часов), чтобы GitHub не считал это ошибкой
-    timeout-minutes: 350 
 
     steps:
     - uses: actions/checkout@v2
 
+    # 1. Восстанавливаем хеш (память), чтобы не спамить
     - name: Restore Previous Hash
       uses: actions/cache@v3
       with:
@@ -23,18 +21,30 @@ jobs:
         restore-keys: |
           zoe-hash-
 
+    # 2. Устанавливаем OpenVPN
     - name: Install OpenVPN
       run: |
         sudo apt-get update
         sudo apt-get install -y openvpn openvpn-systemd-resolved
 
+    # 3. Создаем файл конфига из секрета
     - name: Create VPN config file
       run: echo "${{ secrets.VPN_CONFIG }}" > vpn_config.ovpn
 
+    # 4. Подключаемся (С ЛОГИНОМ И ПАРОЛЕМ)
     - name: Connect to VPN
       uses: "kota65535/github-openvpn-connect-action@v2"
       with:
         config_file: vpn_config.ovpn
+        username: ${{ secrets.VPN_USER }}
+        password: ${{ secrets.VPN_PASS }}
+
+    # 5. Проверяем IP (должен быть UA)
+    - name: Check IP
+      run: |
+        echo "My New IP:"
+        curl ifconfig.me
+        echo " "
 
     - name: Setup Node.js
       uses: actions/setup-node@v2
@@ -44,13 +54,14 @@ jobs:
     - name: Install dependencies
       run: npm install
 
-    # Запускаем бота. Он будет крутиться в цикле 5 часов 50 минут.
-    - name: Run Bot Loop
+    # 6. Запускаем бота
+    - name: Run Bot
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
       run: node index.js
 
+    # 7. Сохраняем память
     - name: Save Hash
       if: always()
       uses: actions/cache@v3
