@@ -1,28 +1,28 @@
-name: Check ZOE via VPN
+name: Check ZOE (Marathon Mode)
 
 on:
   schedule:
-    - cron: '*/5 * * * *' # Каждые 5 минут
-  workflow_dispatch:
+    # Запуск каждые 5 часов (в 0:00, 5:00, 10:00 и т.д.)
+    - cron: '0 */5 * * *' 
+  workflow_dispatch: # Кнопка ручного запуска
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Ставим тайм-аут 350 минут (чуть меньше 6 часов), чтобы GitHub не считал это ошибкой
+    timeout-minutes: 350 
 
     steps:
     - uses: actions/checkout@v2
 
-    # 1. ВОССТАНАВЛИВАЕМ ПАМЯТЬ (ХЕШ)
     - name: Restore Previous Hash
       uses: actions/cache@v3
       with:
         path: last_hash.txt
-        # Ключ зависит от времени, но restore-keys позволяет брать последний доступный
         key: zoe-hash-${{ github.run_id }}
         restore-keys: |
           zoe-hash-
 
-    # 2. Устанавливаем VPN
     - name: Install OpenVPN
       run: |
         sudo apt-get update
@@ -35,8 +35,6 @@ jobs:
       uses: "kota65535/github-openvpn-connect-action@v2"
       with:
         config_file: vpn_config.ovpn
-        username: ${{ secrets.VPN_USER }}
-        password: ${{ secrets.VPN_PASS }}
 
     - name: Setup Node.js
       uses: actions/setup-node@v2
@@ -46,15 +44,13 @@ jobs:
     - name: Install dependencies
       run: npm install
 
-    # 3. ЗАПУСКАЕМ БОТА (Он прочитает и обновит last_hash.txt)
-    - name: Run Bot
+    # Запускаем бота. Он будет крутиться в цикле 5 часов 50 минут.
+    - name: Run Bot Loop
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
       run: node index.js
 
-    # 4. СОХРАНЯЕМ ПАМЯТЬ ДЛЯ СЛЕДУЮЩЕГО РАЗА
-    # (Делаем это даже если бот упал с ошибкой, чтобы не терять прогресс)
     - name: Save Hash
       if: always()
       uses: actions/cache@v3
