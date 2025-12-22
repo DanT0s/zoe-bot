@@ -2,7 +2,7 @@ name: Check ZOE via VPN
 
 on:
   schedule:
-    - cron: '*/3 * * * *' # Каждые 5 минут
+    - cron: '*/5 * * * *' # Каждые 5 минут
   workflow_dispatch:
 
 jobs:
