@@ -2,19 +2,38 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const https = require('https');
 const fs = require('fs');
-const crypto = require('crypto'); // Для создания "отпечатка" текста
+const crypto = require('crypto');
 
 const TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const ZOE_URL = "https://www.zoe.com.ua/wp-json/wp/v2/pages/371392";
 const HASH_FILE = 'last_hash.txt';
 
-const bot = new TelegramBot(TOKEN, { polling: false });
+// Интервал проверки в миллисекундах (300000 = 5 минут)
+// Можно поставить 180000 (3 минуты), теперь это будет работать точно!
+const CHECK_INTERVAL = 180000; 
 
+const bot = new TelegramBot(TOKEN, { polling: false });
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
-async function run() {
-    console.log("🚀 Проверка обновлений...");
+// Функция паузы (Sleep)
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function startLoop() {
+    console.log("🚀 Бот запущен в режиме МАРАФОНА (Long Run)!");
+    
+    // Бесконечный цикл
+    while (true) {
+        await checkSchedule();
+        
+        console.log(`⏳ Жду ${CHECK_INTERVAL / 1000} секунд до следующей проверки...`);
+        await wait(CHECK_INTERVAL);
+    }
+}
+
+async function checkSchedule() {
+    const timeLabel = new Date().toLocaleTimeString('uk-UA', { timeZone: 'Europe/Kiev' });
+    console.log(`[${timeLabel}] 🔄 Проверяю сайт...`);
     
     try {
         const response = await axios.get(ZOE_URL + "?t=" + Date.now(), {
@@ -31,34 +50,25 @@ async function run() {
             const cleanMessage = extractOneScheduleBlock(plainText);
 
             if (cleanMessage.length > 10) {
-                // 1. Создаем цифровой отпечаток (MD5) нового сообщения
                 const currentHash = crypto.createHash('md5').update(cleanMessage).digest('hex');
                 
-                // 2. Читаем старый отпечаток из файла
                 let lastHash = '';
                 if (fs.existsSync(HASH_FILE)) {
                     lastHash = fs.readFileSync(HASH_FILE, 'utf8').trim();
                 }
 
-                // 3. Сравниваем
                 if (currentHash !== lastHash) {
-                    console.log("🔥 ОБНАРУЖЕНО ИЗМЕНЕНИЕ! Отправляю...");
-                    
-                    // Отправляем в Телеграм
+                    console.log("🔥 ЕСТЬ ИЗМЕНЕНИЯ! Отправляю...");
                     await bot.sendMessage(CHAT_ID, cleanMessage, { parse_mode: 'HTML', disable_web_page_preview: true });
-                    
-                    // 4. Сохраняем новый отпечаток в файл
                     fs.writeFileSync(HASH_FILE, currentHash);
                 } else {
-                    console.log("💤 Изменений нет. Сообщение идентично предыдущему.");
-                    // Файл обновлять не надо, пусть лежит старый
+                    console.log("💤 Изменений нет.");
                 }
-            } else {
-                console.log("⚠️ График не найден (пустой фильтр).");
             }
         }
     } catch (e) {
-        console.log(`❌ Ошибка: ${e.message}`);
+        console.log(`❌ Ошибка проверки: ${e.message}`);
+        // В режиме цикла важно не упасть совсем, а просто пропустить итерацию
     }
 }
 
@@ -99,4 +109,5 @@ function convertHtmlToText(html) {
     return t.trim().replace(/\n\s*\n\s*\n/g, "\n\n");
 }
 
-run();
+// Запускаем марафон
+startLoop();
