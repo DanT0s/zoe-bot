@@ -9,7 +9,7 @@ const ZOE_URL = "https://www.zoe.com.ua/wp-json/wp/v2/pages/371392";
 const SAVE_FILE = 'last_header.txt'; 
 
 // ПЕРЕВІРКА: Кожні 3 хвилини
-const CHECK_INTERVAL = 180000; 
+const CHECK_INTERVAL = 120000; 
 
 // РОБОЧИЙ ЧАС: 4 години 50 хвилин (залишаємо час на перезавантаження)
 const WORK_DURATION = (4 * 60 * 60 * 1000) + (50 * 60 * 1000);
