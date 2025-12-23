@@ -2,34 +2,41 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const https = require('https');
 const fs = require('fs');
-const crypto = require('crypto');
 
 const TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const ZOE_URL = "https://www.zoe.com.ua/wp-json/wp/v2/pages/371392";
-const HASH_FILE = 'last_hash.txt';
+const SAVE_FILE = 'last_header.txt'; // Теперь храним тут ЗАГОЛОВОК, а не хеш
 
-// ПРОВЕРКА КАЖДЫЕ 3 МИНУТЫ (180000 мс)
-const CHECK_INTERVAL = 180000;
+// НАСТРОЙКИ ВРЕМЕНИ
+const CHECK_INTERVAL = 180000; // Проверка каждые 3 минуты
+const WORK_DURATION = 5 * 60 * 60 * 1000; // Работать ровно 5 часов
 
 const bot = new TelegramBot(TOKEN, { polling: false });
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Переменная для хранения последнего хеша в памяти
-let memoryHash = '';
+// Переменная для памяти (чтобы помнить заголовок внутри сессии)
+let lastKnownHeader = '';
 
 async function startLoop() {
-    console.log("🚀 ЗАПУСК МАРАФОНА (проверка каждые 3 мин)...");
+    console.log("🚀 ЗАПУСК СМЕНЫ (5 ЧАСОВ)...");
+    const startTime = Date.now();
 
-    // 1. При старте пытаемся вспомнить, что было в прошлой смене (из файла)
-    if (fs.existsSync(HASH_FILE)) {
-        memoryHash = fs.readFileSync(HASH_FILE, 'utf8').trim();
-        console.log(`📂 Восстановлена память: ${memoryHash}`);
+    // 1. Восстанавливаем память из файла (от прошлой смены)
+    if (fs.existsSync(SAVE_FILE)) {
+        lastKnownHeader = fs.readFileSync(SAVE_FILE, 'utf8').trim();
+        console.log(`📂 Загружен прошлый заголовок: "${lastKnownHeader}"`);
     }
 
-    // БЕСКОНЕЧНЫЙ ЦИКЛ
+    // БЕСКОНЕЧНЫЙ ЦИКЛ (пока не пройдет 5 часов)
     while (true) {
+        // Проверка времени: Если прошло 5 часов - выходим
+        if (Date.now() - startTime > WORK_DURATION) {
+            console.log("🛑 Смена окончена (5 часов прошло). Завершаю работу...");
+            break; // Выход из цикла -> скрипт завершится -> GitHub сохранит кэш
+        }
+
         await checkSchedule();
         
         console.log(`⏳ Жду 3 минуты...`);
@@ -39,7 +46,7 @@ async function startLoop() {
 
 async function checkSchedule() {
     const timeLabel = new Date().toLocaleTimeString('uk-UA', { timeZone: 'Europe/Kiev' });
-    console.log(`[${timeLabel}] 🔄 Проверка сайта...`);
+    console.log(`[${timeLabel}] 🔄 Проверка заголовка...`);
     
     try {
         const response = await axios.get(ZOE_URL + "?t=" + Date.now(), {
@@ -56,31 +63,37 @@ async function checkSchedule() {
             const cleanMessage = extractOneScheduleBlock(plainText);
 
             if (cleanMessage.length > 10) {
-                // Создаем "отпечаток" (удаляем пробелы, чтобы исключить ложные срабатывания)
-                const normalizedText = cleanMessage.replace(/\s+/g, '').trim();
-                const currentHash = crypto.createHash('md5').update(normalizedText).digest('hex');
+                // БЕРЕМ ТОЛЬКО ПЕРВУЮ СТРОКУ (ЗАГОЛОВОК)
+                const currentHeader = cleanMessage.split('\n')[0].trim();
 
-                // СРАВНИВАЕМ
-                if (currentHash !== memoryHash) {
-                    console.log("🔥 НОВЫЙ ГРАФИК! Отправляю...");
+                // СРАВНИВАЕМ ЗАГОЛОВКИ (убираем лишнее для точности)
+                if (normalize(currentHeader) !== normalize(lastKnownHeader)) {
+                    console.log(`🔥 ЗАГОЛОВОК ИЗМЕНИЛСЯ! \nБыло: "${lastKnownHeader}"\nСтало: "${currentHeader}"`);
                     
+                    // Отправляем ВСЁ сообщение
                     await bot.sendMessage(CHAT_ID, cleanMessage, { parse_mode: 'HTML', disable_web_page_preview: true });
                     
                     // Обновляем память
-                    memoryHash = currentHash;
-                    // И сохраняем в файл (для следующей смены через 5 часов)
-                    fs.writeFileSync(HASH_FILE, currentHash);
+                    lastKnownHeader = currentHeader;
+                    fs.writeFileSync(SAVE_FILE, currentHeader); // Пишем заголовок в файл
                 } else {
-                    console.log("💤 Изменений нет. Молчу.");
+                    console.log("💤 Заголовок тот же. Молчу.");
                 }
             }
         }
     } catch (e) {
-        console.log(`❌ Ошибка запроса: ${e.message}`);
+        console.log(`❌ Ошибка: ${e.message}`);
     }
 }
 
 // === УТИЛИТЫ ===
+
+// Убирает эмодзи, символы, пробелы - оставляет только буквы и цифры для сравнения
+// Пример: "⚡️ ОНОВЛЕНО 20:45" -> "ОНОВЛЕНО2045"
+function normalize(text) {
+    return text.replace(/[^a-zA-Zа-яА-Я0-9]/g, '').toLowerCase();
+}
+
 function extractOneScheduleBlock(text) {
     const lines = text.split('\n');
     let bestHeader = ""; 
