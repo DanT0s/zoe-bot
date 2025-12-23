@@ -1,29 +1,30 @@
-name: ZOE Marathon (5h Loop + Cache)
+name: ZOE Monitor (Header Check)
 
 on:
   schedule:
-    # Запускаем новую смену каждые 5 часов
+    # Запуск каждые 5 часов (00:00, 05:00, 10:00, 15:00, 20:00...)
     - cron: '0 */5 * * *'
-  workflow_dispatch:
+  workflow_dispatch: # Кнопка
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Даем боту работать 350 минут (5 часов 50 минут) перед отключением
-    timeout-minutes: 350
+    # Тайм-аут 5 часов 30 минут (страховка)
+    timeout-minutes: 330
 
     steps:
     - uses: actions/checkout@v2
 
-    # 1. ВОССТАНАВЛИВАЕМ ПАМЯТЬ ОТ ПРОШЛОЙ СМЕНЫ
-    - name: Restore Previous Hash
+    # 1. ВОССТАНАВЛИВАЕМ ПАМЯТЬ (ЗАГОЛОВОК)
+    - name: Restore Previous Header
       uses: actions/cache@v3
       with:
-        path: last_hash.txt
-        # Ищем любой последний сохраненный файл
-        key: zoe-state-${{ github.run_id }}
+        path: last_header.txt
+        # Ключ: zoe-header- + номер запуска. 
+        # restore-keys берет ПОСЛЕДНИЙ доступный файл с этим префиксом
+        key: zoe-header-${{ github.run_id }}
         restore-keys: |
-          zoe-state-
+          zoe-header-
 
     - name: Install OpenVPN
       run: |
@@ -48,18 +49,17 @@ jobs:
     - name: Install dependencies
       run: npm install
 
-    # 2. ЗАПУСКАЕМ ВЕЧНЫЙ ЦИКЛ (на 5+ часов)
-    - name: Run Bot Loop
+    # 2. ЗАПУСКАЕМ БОТА (Он работает 5 часов и сам выходит)
+    - name: Run Bot (5 Hours)
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
       run: node index.js
 
-    # 3. СОХРАНЯЕМ ПАМЯТЬ ДЛЯ БУДУЩЕЙ СМЕНЫ
-    # (Сработает, когда таймер 350 минут выйдет и GitHub остановит скрипт)
-    - name: Save Hash
+    # 3. СОХРАНЯЕМ ПАМЯТЬ (даже если время вышло)
+    - name: Save Header
       if: always()
       uses: actions/cache@v3
       with:
-        path: last_hash.txt
-        key: zoe-state-${{ github.run_id }}
+        path: last_header.txt
+        key: zoe-header-${{ github.run_id }}
