@@ -11,25 +11,23 @@ const STATE_FILE = 'zoe_state.json';
 // Налаштування
 const CHECK_INTERVAL = 120000; // 2 хвилини
 const WORK_DURATION = (4 * 60 * 60 * 1000) + (50 * 60 * 1000);
+const UA_MONTHS = ["СІЧНЯ", "ЛЮТОГО", "БЕРЕЗНЯ", "КВІТНЯ", "ТРАВНЯ", "ЧЕРВНЯ", "ЛИПНЯ", "СЕРПНЯ", "ВЕРЕСНЯ", "ЖОВТНЯ", "ЛИСТОПАДА", "ГРУДНЯ"];
 
 const bot = new TelegramBot(TOKEN, { polling: false });
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Місяці для перевірки (щоб не плутати Листопад з Груднем)
-const UA_MONTHS = ["СІЧНЯ", "ЛЮТОГО", "БЕРЕЗНЯ", "КВІТНЯ", "ТРАВНЯ", "ЧЕРВНЯ", "ЛИПНЯ", "СЕРПНЯ", "ВЕРЕСНЯ", "ЖОВТНЯ", "ЛИСТОПАДА", "ГРУДНЯ"];
-
 let memory = { today: "", tomorrow: "" };
 
 async function startLoop() {
-    console.log("🚀 ЗАПУСК: Перевірка місяця та чистоти даних...");
+    console.log("🚀 ЗАПУСК: Парсер с приоритетом на заголовок 24px...");
 
     if (fs.existsSync(STATE_FILE)) {
         try {
             memory = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
             console.log("📂 Пам'ять завантажено.");
         } catch (e) {
-            console.log("⚠️ Помилка пам'яті.");
+            console.log("⚠️ Помилка читання пам'яті.");
         }
     }
 
@@ -60,19 +58,26 @@ async function checkSchedule() {
 
         if (response.status === 200) {
             const html = response.data;
-            const plainText = convertHtmlToText(html);
             
-            // Парсимо з урахуванням місяця
+            // 1. Спочатку чистимо весь текст як зазвичай
+            let plainText = convertHtmlToText(html);
+
+            // 2. Спробуємо знайти спец-заголовок (font-size: 24px)
+            const specialHeader = extractBigHeader(html);
+
+            // 3. Якщо знайшли гарний заголовок, додаємо його НА ПОЧАТОК тексту
+            // Це змусить парсер побачити його першим і використати його
+            if (specialHeader) {
+                //console.log(`🎯 Знайдено VIP заголовок: ${specialHeader}`);
+                plainText = specialHeader + "\n" + plainText;
+            }
+
             const foundSchedules = parseSchedulesByDate(plainText);
 
             // 1. СЬОГОДНІ
             if (foundSchedules.today) {
-                const currentHeader = foundSchedules.today.split('\n')[0];
-                const savedHeader = memory.today ? memory.today.split('\n')[0] : "";
-
-                // Порівнюємо без урахування регістру і пробілів
-                if (normalize(currentHeader) !== normalize(savedHeader)) {
-                    console.log(`🔥 ОНОВЛЕННЯ СЬОГОДНІ: ${currentHeader}`);
+                if (normalize(foundSchedules.today) !== normalize(memory.today)) {
+                    console.log(`🔥 ОНОВЛЕННЯ СЬОГОДНІ!`);
                     await bot.sendMessage(CHAT_ID, foundSchedules.today, { parse_mode: 'HTML', disable_web_page_preview: true });
                     memory.today = foundSchedules.today;
                     saveState();
@@ -81,19 +86,12 @@ async function checkSchedule() {
 
             // 2. ЗАВТРА
             if (foundSchedules.tomorrow) {
-                const currentHeader = foundSchedules.tomorrow.split('\n')[0];
-                const savedHeader = memory.tomorrow ? memory.tomorrow.split('\n')[0] : "";
-
-                if (normalize(currentHeader) !== normalize(savedHeader)) {
-                    console.log(`🔥 ОНОВЛЕННЯ ЗАВТРА: ${currentHeader}`);
+                if (normalize(foundSchedules.tomorrow) !== normalize(memory.tomorrow)) {
+                    console.log(`🔥 ОНОВЛЕННЯ ЗАВТРА!`);
                     await bot.sendMessage(CHAT_ID, foundSchedules.tomorrow, { parse_mode: 'HTML', disable_web_page_preview: true });
                     memory.tomorrow = foundSchedules.tomorrow;
                     saveState();
                 }
-            }
-            
-            if (!foundSchedules.today && !foundSchedules.tomorrow) {
-                console.log("💤 Не знайдено графіків за поточні дати.");
             }
         }
     } catch (e) {
@@ -105,27 +103,57 @@ function saveState() {
     fs.writeFileSync(STATE_FILE, JSON.stringify(memory, null, 2));
 }
 
-// === ГОЛОВНА ЛОГІКА ===
+// === НОВА ФУНКЦІЯ ДЛЯ ПОШУКУ ЗАГОЛОВКА 24px ===
+function extractBigHeader(html) {
+    // Шукаємо span з розміром 24px
+    // Ми беремо шматок HTML починаючи з цього стилю
+    const marker = 'font-size: 24px';
+    const index = html.indexOf(marker);
+    
+    if (index === -1) return null;
+
+    // Відрізаємо все, що було до цього стилю
+    let substring = html.slice(index);
+    
+    // Шукаємо кінець блоку (зазвичай це кінець параграфа </p> або перенос <br>)
+    // На скріншоті це все в <p>, тому шукаємо </p>
+    let endIndex = substring.indexOf('</p>');
+    if (endIndex === -1) endIndex = substring.indexOf('<br'); // на всяк випадок
+
+    if (endIndex !== -1) {
+        substring = substring.slice(0, endIndex);
+    }
+
+    // Чистимо отриманий шматок від HTML тегів, щоб отримати чистий текст
+    // Додаємо фіктивний <span> на початок, щоб convertHtmlToText коректно відпрацював, 
+    // бо ми обрізали початок тегу
+    let cleanText = convertHtmlToText('<span style="' + substring);
+    
+    // Прибираємо зайві пробіли
+    cleanText = cleanText.replace(/\s+/g, ' ').trim();
+    
+    if (cleanText.length < 5) return null; // Занадто короткий, мабуть помилка
+
+    return cleanText;
+}
+
+// === РОЗУМНИЙ ПАРСЕР ===
 function parseSchedulesByDate(text) {
     const lines = text.split('\n');
     const result = { today: null, tomorrow: null };
 
-    // Визначаємо поточні дати
     const uaDate = new Date(new Date().toLocaleString("en-US", {timeZone: "Europe/Kiev"}));
-    
     const dayToday = uaDate.getDate(); 
-    const monthNameToday = UA_MONTHS[uaDate.getMonth()]; // Наприклад "ГРУДНЯ"
+    const monthNameToday = UA_MONTHS[uaDate.getMonth()];
     
     const uaTomorrow = new Date(uaDate);
     uaTomorrow.setDate(dayToday + 1);
     const dayTomorrow = uaTomorrow.getDate();
     const monthNameTomorrow = UA_MONTHS[uaTomorrow.getMonth()];
 
-    // Регулярка: шукає Число + Місяць (словом)
-    // (СІЧНЯ|...|ГРУДНЯ) - обов'язково
+    // Регулярка для дати
     const headerRegex = /(\d{1,2})[\s\.]+(СІЧНЯ|ЛЮТОГО|БЕРЕЗНЯ|КВІТНЯ|ТРАВНЯ|ЧЕРВНЯ|ЛИПНЯ|СЕРПНЯ|ВЕРЕСНЯ|ЖОВТНЯ|ЛИСТОПАДА|ГРУДНЯ)/i;
-    
-    // Регулярка для черг: суворо початок рядка "1.1", "2.1" тощо
+    // Регулярка для черг (1.1 ...)
     const exactQueueRegex = /^\s*[1-6]\.[1-2]/;
 
     let currentBlock = null; 
@@ -135,55 +163,61 @@ function parseSchedulesByDate(text) {
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
         
-        // 1. Знайшли заголовок дати?
+        // --- ПОШУК ЗАГОЛОВКА ---
         const match = line.match(headerRegex);
-        if (match && (line.includes("ГПВ") || line.toUpperCase().includes("ГРАФІК") || line.toUpperCase().includes("ОНОВЛЕНО"))) {
+        if (match && (line.includes("ГПВ") || line.toUpperCase().includes("ГРАФІК") || line.toUpperCase().includes("ОНОВЛЕНО") || line.toUpperCase().includes("ВІДКЛЮЧЕН"))) {
             
-            // Якщо це "Орієнтовна схема" - ігноруємо
             if (line.includes("Орієнтовна схема")) continue;
 
-            // Зберігаємо попередній блок, якщо він був
+            // Зберігаємо попередній блок
             if (currentBlock && bufferLines.length > 0) {
                 result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
             }
 
-            // --- ПЕРЕВІРКА ДАТИ ---
+            // Визначаємо дату
             const foundDay = parseInt(match[1]);
-            const foundMonth = match[2].toUpperCase(); // Місяць з тексту
+            const foundMonth = match[2].toUpperCase();
 
-            // Скидаємо буфер
-            bufferHeader = line;
+            // Скидаємо буфери
             bufferLines = [];
             currentBlock = null;
 
-            // Перевіряємо, чи збігається дата і МІСЯЦЬ
+            // Визначаємо день (сьогодні/завтра)
             if (foundDay === dayToday && foundMonth === monthNameToday) {
                 currentBlock = 'today';
             } else if (foundDay === dayTomorrow && foundMonth === monthNameTomorrow) {
                 currentBlock = 'tomorrow';
             }
-            // Якщо місяць не збігається (наприклад "25 Листопада"), currentBlock залишиться null, і ми проігноруємо цей блок
+
+            // === ЛОГІКА ВИБОРУ ЗАГОЛОВКА ===
+            // Оскільки ми додали specialHeader на початок, він прийде сюди першим.
+            // Він короткий і містить "ОНОВЛЕНО". Ми його беремо.
+            
+            if (line.length > 80 || line.includes("Відповідно") || line.includes("Укренерго")) {
+                // Якщо це довгий нудний текст, генеруємо свій
+                bufferHeader = `ГРАФІК ВІДКЛЮЧЕНЬ НА ${foundDay} ${foundMonth}`;
+            } else {
+                // Якщо це наш красивий заголовок з сайту (font-size 24)
+                bufferHeader = line;
+            }
             continue;
         }
 
-        // 2. Збираємо рядки (ТІЛЬКИ ЯКЩО МИ В АКТУАЛЬНОМУ БЛОЦІ)
+        // --- ЗБІР ЧЕРГ ---
         if (currentBlock) {
-            // Беремо рядок ТІЛЬКИ якщо він починається на цифри черги (1.1 ...)
             if (exactQueueRegex.test(line)) {
-                
-                // Стоп-кран: якщо знову 1.1 - це дубль, закриваємо блок
+                // Стоп-кран (дублікати)
                 if (line.startsWith("1.1") && bufferLines.length > 0) {
-                     result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
-                     currentBlock = null;
-                     bufferLines = [];
-                     continue;
+                      result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
+                      currentBlock = null;
+                      bufferLines = [];
+                      continue;
                 }
                 bufferLines.push(line);
             }
         }
     }
 
-    // Зберігаємо хвіст
     if (currentBlock && bufferLines.length > 0) {
         result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
     }
@@ -192,6 +226,7 @@ function parseSchedulesByDate(text) {
 }
 
 function normalize(text) {
+    if (!text) return "";
     return text.replace(/[^a-zA-Zа-яА-Я0-9]/g, '').toLowerCase();
 }
 
