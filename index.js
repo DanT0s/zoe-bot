@@ -19,7 +19,7 @@ const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 let lastKnownHeader = '';
 
 async function startLoop() {
-    console.log("🚀 ЗАПУСК: Режим «Тільки цифри»...");
+    console.log("🚀 ЗАПУСК: Режим «Стоп після 6.2»...");
 
     if (fs.existsSync(SAVE_FILE)) {
         lastKnownHeader = fs.readFileSync(SAVE_FILE, 'utf8').trim();
@@ -55,17 +55,16 @@ async function checkSchedule() {
             const html = response.data;
             const plainText = convertHtmlToText(html);
             
-            // Шукаємо чистий графік (Заголовок + тільки цифри)
             const result = findHeaderAndCleanBody(plainText);
 
             if (result) {
                 const currentHeader = result.header;
                 const cleanMessage = result.fullText;
 
-                console.log(`🔍 Знайшов графік на: "${currentHeader}"`);
+                console.log(`🔍 Графік: "${currentHeader}"`);
 
                 if (normalize(currentHeader) !== normalize(lastKnownHeader)) {
-                    console.log(`🔥 НОВИЙ ГРАФІК! Відправляю...`);
+                    console.log(`🔥 ОНОВЛЕННЯ! Відправляю (без дублів)...`);
                     
                     await bot.sendMessage(CHAT_ID, cleanMessage, { parse_mode: 'HTML', disable_web_page_preview: true });
                     
@@ -75,7 +74,7 @@ async function checkSchedule() {
                     console.log("💤 Заголовок не змінився.");
                 }
             } else {
-                console.log("⚠️ Заголовок не знайдено.");
+                console.log("⚠️ Графік не знайдено.");
             }
         }
     } catch (e) {
@@ -83,16 +82,15 @@ async function checkSchedule() {
     }
 }
 
-// === НОВА ЛОГІКА ФІЛЬТРАЦІЇ ===
+// === ГОЛОВНА ЛОГІКА ФІЛЬТРАЦІЇ ===
 
 function findHeaderAndCleanBody(text) {
     const lines = text.split('\n');
     
-    // Регулярка для заголовка (Дата + ГПВ)
+    // Заголовок (Дата + ГПВ)
     const headerRegex = /(\d{1,2})[\s\.]+(СІЧНЯ|ЛЮТОГО|БЕРЕЗНЯ|КВІТНЯ|ТРАВНЯ|ЧЕРВНЯ|ЛИПНЯ|СЕРПНЯ|ВЕРЕСНЯ|ЖОВТНЯ|ЛИСТОПАДА|ГРУДНЯ|\d{2}).*(ГПВ|ГРАФІК|ОНОВЛЕНО|ДІЯТИМУТЬ)/i;
 
-    // Регулярка ТІЛЬКИ для черг (1.1, 1.2 ... 6.2)
-    // Шукає рядок, що починається з цифри 1-6, крапки, цифри 1-2
+    // Регулярка для черг (1.1 ...)
     const exactQueueRegex = /^\s*[1-6]\.[1-2]/;
 
     let headerIndex = -1;
@@ -111,25 +109,32 @@ function findHeaderAndCleanBody(text) {
 
     if (headerIndex === -1) return null;
 
-    // 2. Збираємо ТІЛЬКИ рядки з чергами, які йдуть після заголовка
+    // 2. Збираємо черги, але слідкуємо, щоб не піти на друге коло
     let cleanLines = [];
     
-    // Дивимось наступні 50 рядків після заголовка
-    for (let i = headerIndex + 1; i < Math.min(lines.length, headerIndex + 50); i++) {
+    for (let i = headerIndex + 1; i < lines.length; i++) {
         const line = lines[i].trim();
 
-        // Якщо раптом зустріли ІНШУ дату (старий графік знизу) - СТОП
+        // Умова 1: Якщо знову бачимо заголовок з датою - СТОП
         if (i > headerIndex + 2 && headerRegex.test(line)) {
             break; 
         }
 
-        // БЕРЕМО ТІЛЬКИ ЯКЩО РЯДОК ПОЧИНАЄТЬСЯ НА "1.1", "2.1" і т.д.
+        // Умова 2: Якщо рядок схожий на чергу
         if (exactQueueRegex.test(line)) {
+            
+            // === ГОЛОВНА ПРАВКА ===
+            // Якщо ми зустріли "1.1", але у нас вже є записані рядки...
+            // Це означає, що почався старий графік. ЗУПИНЯЄМОСЬ!
+            if (line.startsWith("1.1") && cleanLines.length > 0) {
+                break;
+            }
+
             cleanLines.push(line);
         }
     }
 
-    if (cleanLines.length === 0) return null; // Якщо черг не знайшли, нічого не шлемо
+    if (cleanLines.length === 0) return null;
 
     const fullText = `⚡️ <b>${foundHeader}</b>\n\n${cleanLines.join('\n')}`;
 
@@ -146,21 +151,15 @@ function normalize(text) {
 function convertHtmlToText(html) {
     let t = html;
     t = t.replace(/<style([\s\S]*?)<\/style>/gi, "").replace(/<script([\s\S]*?)<\/script>/gi, "");
-    
-    // Переносимо рядки
     t = t.replace(/<\/(div|p|tr|li|h[1-6])>/gi, "\n");
     t = t.replace(/<br\s*\/?>/gi, "\n");
     t = t.replace(/<\/td>/gi, " "); 
-    
-    t = t.replace(/<[^>]+>/g, ""); // Видаляємо теги
-    
-    // Чистимо спецсимволи
+    t = t.replace(/<[^>]+>/g, ""); 
     t = t.replace(/&nbsp;/g, " ")
          .replace(/&#8211;/g, "-")
          .replace(/&ndash;/g, "-")
          .replace(/&#8217;/g, "'")
          .replace(/&quot;/g, '"');
-         
     return t.split('\n').map(l => l.trim()).filter(l => l.length > 0).join('\n');
 }
 
