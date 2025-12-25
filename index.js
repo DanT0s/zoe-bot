@@ -6,24 +6,33 @@ const fs = require('fs');
 const TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 const ZOE_PAGE_URL = "https://www.zoe.com.ua/%D0%B3%D1%80%D0%B0%D1%84%D1%96%D0%BA%D0%B8-%D0%BF%D0%BE%D0%B3%D0%BE%D0%B4%D0%B8%D0%BD%D0%BD%D0%B8%D1%85-%D1%81%D1%82%D0%B0%D0%B1%D1%96%D0%BB%D1%96%D0%B7%D0%B0%D1%86%D1%96%D0%B9%D0%BD%D0%B8%D1%85/";
-const SAVE_FILE = 'last_header.txt'; 
 
-// Перевірка кожні 2 хвилини
-const CHECK_INTERVAL = 120000; 
+const STATE_FILE = 'zoe_state.json'; // Тепер зберігаємо JSON структуру
+
+// Налаштування
+const CHECK_INTERVAL = 120000; // 2 хвилини
 const WORK_DURATION = (4 * 60 * 60 * 1000) + (50 * 60 * 1000);
 
 const bot = new TelegramBot(TOKEN, { polling: false });
 const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-let lastKnownHeader = '';
+// Пам'ять тепер об'єкт
+let memory = {
+    today: "",    // Текст графіка на сьогодні
+    tomorrow: ""  // Текст графіка на завтра
+};
 
 async function startLoop() {
-    console.log("🚀 ЗАПУСК: Режим «Стоп після 6.2»...");
+    console.log("🚀 ЗАПУСК: Моніторинг ДВОХ дат (Сьогодні/Завтра)...");
 
-    if (fs.existsSync(SAVE_FILE)) {
-        lastKnownHeader = fs.readFileSync(SAVE_FILE, 'utf8').trim();
-        console.log(`📂 В пам'яті: "${lastKnownHeader}"`);
+    if (fs.existsSync(STATE_FILE)) {
+        try {
+            memory = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+            console.log("📂 Пам'ять завантажено.");
+        } catch (e) {
+            console.log("⚠️ Помилка читання пам'яті, створюю нову.");
+        }
     }
 
     const startTime = Date.now();
@@ -42,7 +51,7 @@ async function startLoop() {
 
 async function checkSchedule() {
     const timeLabel = new Date().toLocaleTimeString('uk-UA', { timeZone: 'Europe/Kiev' });
-    console.log(`[${timeLabel}] 🔄 Скачую...`);
+    console.log(`[${timeLabel}] 🔄 Сканую сторінку...`);
     
     try {
         const response = await axios.get(ZOE_PAGE_URL + "?t=" + Date.now(), {
@@ -55,26 +64,40 @@ async function checkSchedule() {
             const html = response.data;
             const plainText = convertHtmlToText(html);
             
-            const result = findHeaderAndCleanBody(plainText);
+            // Отримуємо об'єкт із знайденими графіками { today: "...", tomorrow: "..." }
+            const foundSchedules = parseSchedulesByDate(plainText);
 
-            if (result) {
-                const currentHeader = result.header;
-                const cleanMessage = result.fullText;
+            // 1. ПЕРЕВІРКА "СЬОГОДНІ"
+            if (foundSchedules.today) {
+                // Порівнюємо заголовки (перший рядок повідомлення)
+                const currentHeader = foundSchedules.today.split('\n')[0];
+                const savedHeader = memory.today ? memory.today.split('\n')[0] : "";
 
-                console.log(`🔍 Графік: "${currentHeader}"`);
-
-                if (normalize(currentHeader) !== normalize(lastKnownHeader)) {
-                    console.log(`🔥 ОНОВЛЕННЯ! Відправляю (без дублів)...`);
-                    
-                    await bot.sendMessage(CHAT_ID, cleanMessage, { parse_mode: 'HTML', disable_web_page_preview: true });
-                    
-                    lastKnownHeader = currentHeader;
-                    fs.writeFileSync(SAVE_FILE, currentHeader); 
-                } else {
-                    console.log("💤 Заголовок не змінився.");
+                if (normalize(currentHeader) !== normalize(savedHeader)) {
+                    console.log(`🔥 ОНОВЛЕННЯ НА СЬОГОДНІ!`);
+                    await bot.sendMessage(CHAT_ID, foundSchedules.today, { parse_mode: 'HTML', disable_web_page_preview: true });
+                    memory.today = foundSchedules.today;
+                    saveState();
                 }
+            }
+
+            // 2. ПЕРЕВІРКА "ЗАВТРА"
+            if (foundSchedules.tomorrow) {
+                const currentHeader = foundSchedules.tomorrow.split('\n')[0];
+                const savedHeader = memory.tomorrow ? memory.tomorrow.split('\n')[0] : "";
+
+                if (normalize(currentHeader) !== normalize(savedHeader)) {
+                    console.log(`🔥 ОНОВЛЕННЯ НА ЗАВТРА!`);
+                    await bot.sendMessage(CHAT_ID, foundSchedules.tomorrow, { parse_mode: 'HTML', disable_web_page_preview: true });
+                    memory.tomorrow = foundSchedules.tomorrow;
+                    saveState();
+                }
+            }
+            
+            if (!foundSchedules.today && !foundSchedules.tomorrow) {
+                console.log("⚠️ Графіків не знайдено взагалі.");
             } else {
-                console.log("⚠️ Графік не знайдено.");
+                console.log("💤 Змін не виявлено.");
             }
         }
     } catch (e) {
@@ -82,66 +105,78 @@ async function checkSchedule() {
     }
 }
 
-// === ГОЛОВНА ЛОГІКА ФІЛЬТРАЦІЇ ===
+function saveState() {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(memory, null, 2));
+}
 
-function findHeaderAndCleanBody(text) {
+// === РОЗУМНИЙ ПАРСЕР ПО ДАТАХ ===
+function parseSchedulesByDate(text) {
     const lines = text.split('\n');
-    
-    // Заголовок (Дата + ГПВ)
-    const headerRegex = /(\d{1,2})[\s\.]+(СІЧНЯ|ЛЮТОГО|БЕРЕЗНЯ|КВІТНЯ|ТРАВНЯ|ЧЕРВНЯ|ЛИПНЯ|СЕРПНЯ|ВЕРЕСНЯ|ЖОВТНЯ|ЛИСТОПАДА|ГРУДНЯ|\d{2}).*(ГПВ|ГРАФІК|ОНОВЛЕНО|ДІЯТИМУТЬ)/i;
+    const result = { today: null, tomorrow: null };
 
+    // Визначаємо дати (число місяця) для сьогодні і завтра в Україні
+    const uaDate = new Date(new Date().toLocaleString("en-US", {timeZone: "Europe/Kiev"}));
+    const dayToday = uaDate.getDate(); // Наприклад, 26
+    
+    const uaTomorrow = new Date(uaDate);
+    uaTomorrow.setDate(dayToday + 1);
+    const dayTomorrow = uaTomorrow.getDate(); // Наприклад, 27
+
+    // Регулярка для заголовка
+    const headerRegex = /(\d{1,2})[\s\.]+(СІЧНЯ|ЛЮТОГО|БЕРЕЗНЯ|КВІТНЯ|ТРАВНЯ|ЧЕРВНЯ|ЛИПНЯ|СЕРПНЯ|ВЕРЕСНЯ|ЖОВТНЯ|ЛИСТОПАДА|ГРУДНЯ|\d{2}).*(ГПВ|ГРАФІК|ОНОВЛЕНО|ДІЯТИМУТЬ)/i;
     // Регулярка для черг (1.1 ...)
     const exactQueueRegex = /^\s*[1-6]\.[1-2]/;
 
-    let headerIndex = -1;
-    let foundHeader = "";
+    let currentBlock = null; // 'today' або 'tomorrow'
+    let bufferHeader = "";
+    let bufferLines = [];
 
-    // 1. Шукаємо заголовок
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
-        if (headerRegex.test(line)) {
-            if (line.includes("Орієнтовна схема")) continue;
-            headerIndex = i;
-            foundHeader = line;
-            break; 
-        }
-    }
-
-    if (headerIndex === -1) return null;
-
-    // 2. Збираємо черги, але слідкуємо, щоб не піти на друге коло
-    let cleanLines = [];
-    
-    for (let i = headerIndex + 1; i < lines.length; i++) {
-        const line = lines[i].trim();
-
-        // Умова 1: Якщо знову бачимо заголовок з датою - СТОП
-        if (i > headerIndex + 2 && headerRegex.test(line)) {
-            break; 
-        }
-
-        // Умова 2: Якщо рядок схожий на чергу
-        if (exactQueueRegex.test(line)) {
+        
+        // 1. Якщо знайшли заголовок
+        if (headerRegex.test(line) && !line.includes("Орієнтовна схема")) {
             
-            // === ГОЛОВНА ПРАВКА ===
-            // Якщо ми зустріли "1.1", але у нас вже є записані рядки...
-            // Це означає, що почався старий графік. ЗУПИНЯЄМОСЬ!
-            if (line.startsWith("1.1") && cleanLines.length > 0) {
-                break;
+            // Якщо ми вже щось збирали перед цим - збережемо це
+            if (currentBlock && bufferLines.length > 0) {
+                result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
             }
 
-            cleanLines.push(line);
+            // Починаємо новий блок
+            bufferHeader = line;
+            bufferLines = [];
+            currentBlock = null;
+
+            // Визначаємо, це на сьогодні чи на завтра?
+            const match = line.match(/(\d{1,2})/); // Шукаємо перше число в рядку
+            if (match) {
+                const dayFound = parseInt(match[1]);
+                if (dayFound === dayToday) currentBlock = 'today';
+                else if (dayFound === dayTomorrow) currentBlock = 'tomorrow';
+            }
+            continue;
+        }
+
+        // 2. Якщо ми всередині блоку (today або tomorrow) і знайшли чергу
+        if (currentBlock && exactQueueRegex.test(line)) {
+            // "Стоп-кран": якщо знову 1.1, а ми вже назбирали даних - це дубль або помилка
+            if (line.startsWith("1.1") && bufferLines.length > 0) {
+                 // Закриваємо поточний блок і чекаємо наступного заголовка
+                 result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
+                 currentBlock = null;
+                 bufferLines = [];
+                 continue;
+            }
+            bufferLines.push(line);
         }
     }
 
-    if (cleanLines.length === 0) return null;
+    // Зберігаємо останній блок, якщо цикл закінчився
+    if (currentBlock && bufferLines.length > 0) {
+        result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
+    }
 
-    const fullText = `⚡️ <b>${foundHeader}</b>\n\n${cleanLines.join('\n')}`;
-
-    return {
-        header: foundHeader,
-        fullText: fullText
-    };
+    return result;
 }
 
 function normalize(text) {
@@ -155,11 +190,7 @@ function convertHtmlToText(html) {
     t = t.replace(/<br\s*\/?>/gi, "\n");
     t = t.replace(/<\/td>/gi, " "); 
     t = t.replace(/<[^>]+>/g, ""); 
-    t = t.replace(/&nbsp;/g, " ")
-         .replace(/&#8211;/g, "-")
-         .replace(/&ndash;/g, "-")
-         .replace(/&#8217;/g, "'")
-         .replace(/&quot;/g, '"');
+    t = t.replace(/&nbsp;/g, " ").replace(/&#8211;/g, "-").replace(/&ndash;/g, "-").replace(/&#8217;/g, "'").replace(/&quot;/g, '"');
     return t.split('\n').map(l => l.trim()).filter(l => l.length > 0).join('\n');
 }
 
