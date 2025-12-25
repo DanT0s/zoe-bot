@@ -2,6 +2,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const https = require('https');
 const fs = require('fs');
+const jsdom = require("jsdom"); // НАМ ПОТРІБНА JSDOM АБО МИ ЗРОБИМО ЦЕ РЕГУЛЯРКАМИ (Нижче варіант без JSDOM, чистий JS)
 
 const TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
@@ -10,7 +11,7 @@ const STATE_FILE = 'zoe_state.json';
 
 // Налаштування
 const CHECK_INTERVAL = 120000; // 2 хвилини
-const WORK_DURATION = (4 * 60 * 60 * 1000) + (50 * 60 * 1000);
+const WORK_DURATION = (4 * 60 * 60 * 1000) + (50 * 60 * 1000); // Час роботи бота
 const UA_MONTHS = ["СІЧНЯ", "ЛЮТОГО", "БЕРЕЗНЯ", "КВІТНЯ", "ТРАВНЯ", "ЧЕРВНЯ", "ЛИПНЯ", "СЕРПНЯ", "ВЕРЕСНЯ", "ЖОВТНЯ", "ЛИСТОПАДА", "ГРУДНЯ"];
 
 const bot = new TelegramBot(TOKEN, { polling: false });
@@ -20,7 +21,7 @@ const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 let memory = { today: "", tomorrow: "" };
 
 async function startLoop() {
-    console.log("🚀 ЗАПУСК: Тільки великі заголовки (без 'За вказівкою')...");
+    console.log("🚀 ЗАПУСК: Розумний блочний парсер (з файлу 123.txt)...");
 
     if (fs.existsSync(STATE_FILE)) {
         try {
@@ -58,22 +59,11 @@ async function checkSchedule() {
 
         if (response.status === 200) {
             const html = response.data;
-            
-            // 1. Знаходимо "Красивий заголовок" (той що 24px)
-            const exactHeader = extractBigHeader(html);
-            
-            // 2. Отримуємо весь текст
-            let plainText = convertHtmlToText(html);
-
-            // 3. Ставимо красивий заголовок на самий початок
-            if (exactHeader) {
-                plainText = exactHeader + "\n" + plainText;
-            }
-
-            const foundSchedules = parseSchedulesByDate(plainText);
+            const foundSchedules = parseHtmlSmart(html);
 
             // 1. СЬОГОДНІ
             if (foundSchedules.today) {
+                // Порівнюємо видаливши зайві пробіли, щоб уникнути помилкових спрацювань
                 if (normalize(foundSchedules.today) !== normalize(memory.today)) {
                     console.log(`🔥 ОНОВЛЕННЯ СЬОГОДНІ!`);
                     await bot.sendMessage(CHAT_ID, foundSchedules.today, { parse_mode: 'HTML', disable_web_page_preview: true });
@@ -101,41 +91,11 @@ function saveState() {
     fs.writeFileSync(STATE_FILE, JSON.stringify(memory, null, 2));
 }
 
-// === ВИТЯГУЄМО ТІЛЬКИ ТЕКСТ З 24px ===
-function extractBigHeader(html) {
-    // Шукаємо стиль розміру шрифту
-    const marker = 'font-size: 24px';
-    const startIdx = html.indexOf(marker);
-    
-    if (startIdx === -1) return null;
-
-    let chunk = html.substring(startIdx);
-    
-    // Шукаємо кінець блоку (<br> або </p>)
-    const endIdx = chunk.search(/<br\s*\/?>|<\/p>/i);
-    
-    if (endIdx !== -1) {
-        chunk = chunk.substring(0, endIdx);
-    } else {
-        chunk = chunk.substring(0, 300);
-    }
-
-    // Чистимо
-    chunk = chunk.replace(/&nbsp;/g, ' ');
-    chunk = chunk.replace(/<[^>]+>/g, ' ');
-    let cleanText = chunk.replace(/\s+/g, ' ').trim();
-
-    if (cleanText.length > 5) {
-        return cleanText;
-    }
-    return null;
-}
-
-// === ПАРСЕР ===
-function parseSchedulesByDate(text) {
-    const lines = text.split('\n');
+// === ГОЛОВНА ЛОГІКА ПАРСИНГУ ===
+function parseHtmlSmart(html) {
     const result = { today: null, tomorrow: null };
 
+    // Дати для порівняння
     const uaDate = new Date(new Date().toLocaleString("en-US", {timeZone: "Europe/Kiev"}));
     const dayToday = uaDate.getDate(); 
     const monthNameToday = UA_MONTHS[uaDate.getMonth()];
@@ -145,87 +105,144 @@ function parseSchedulesByDate(text) {
     const dayTomorrow = uaTomorrow.getDate();
     const monthNameTomorrow = UA_MONTHS[uaTomorrow.getMonth()];
 
-    // Регулярка для дати (будь-де в рядку)
+    // 1. Розбиваємо HTML на "розумні рядки". 
+    // Це масив об'єктів: { text: "string", isRed: boolean }
+    const linesObj = splitHtmlToLinesWithStyle(html);
+
+    let activeHeader = null; // Поточний найкращий заголовок
+    let activeHeaderIsRed = false; // Чи є поточний заголовок "червоним" (VIP)
+    
+    let currentQueues = []; // Накопичувач черг
+    let headerDateInfo = null; // { day: 25, month: "ГРУДНЯ" } для поточного заголовка
+
+    // Регулярки
     const dateRegex = /(\d{1,2})[\s\.]+(СІЧНЯ|ЛЮТОГО|БЕРЕЗНЯ|КВІТНЯ|ТРАВНЯ|ЧЕРВНЯ|ЛИПНЯ|СЕРПНЯ|ВЕРЕСНЯ|ЖОВТНЯ|ЛИСТОПАДА|ГРУДНЯ)/i;
-    const exactQueueRegex = /^\s*[1-6]\.[1-2]/;
+    const queueRegex = /^\s*[1-6]\.[1-2]/;
 
-    let currentBlock = null; 
-    let bufferHeader = "";
-    let bufferLines = [];
+    for (let i = 0; i < linesObj.length; i++) {
+        const lineData = linesObj[i];
+        const text = lineData.text;
+        const isRed = lineData.isRed; // true, якщо це font-size: 24px
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (line.length === 0) continue;
+        // А. Перевіряємо, чи це ЗАГОЛОВОК (містить дату і ключові слова)
+        const dateMatch = text.match(dateRegex);
+        const upperText = text.toUpperCase();
         
-        const match = line.match(dateRegex);
-        
-        // Перевіряємо, чи це рядок заголовка
-        if (match && (line.toUpperCase().includes("ГПВ") || line.toUpperCase().includes("ГРАФІК") || line.toUpperCase().includes("ОНОВЛЕНО") || line.toUpperCase().includes("ВІДКЛЮЧЕН"))) {
+        const isHeaderKeywords = upperText.includes("ГПВ") || upperText.includes("ГРАФІК") || upperText.includes("ОНОВЛЕН") || upperText.includes("ВІДКЛЮЧЕН") || upperText.includes("ДІЯТИМУТЬ");
+
+        if (dateMatch && isHeaderKeywords) {
+            // Якщо ми зустріли новий потенційний заголовок, а старий вже мав черги -> треба зберегти попередній
+            if (currentQueues.length > 0 && activeHeader) {
+                saveBlock(result, activeHeader, currentQueues, headerDateInfo, dayToday, monthNameToday, dayTomorrow, monthNameTomorrow);
+                currentQueues = [];
+                activeHeader = null;
+                activeHeaderIsRed = false;
+            }
+
+            // Логіка вибору заголовка:
+            // 1. Якщо це "Червоний" (24px) - беремо без питань.
+            // 2. Якщо це звичайний текст, беремо тільки якщо у нас ще немає активного заголовка АБО попередній не був червоним.
+            // (Тобто червоний заголовок не можна перебити звичайним текстом "За вказівкою...")
             
-            // === ГОЛОВНИЙ ФІЛЬТР ===
-            // Якщо це "адміністративний" текст, ми його ІГНОРУЄМО, навіть якщо там є дата.
-            // Ми хочемо, щоб залишився заголовок, який був знайдений ДО цього (наш injected header).
-            if (line.includes("За вказівкою") || line.includes("Відповідно") || line.includes("Укренерго") || line.includes("Орієнтовна схема")) {
-                continue; 
+            if (isRed) {
+                activeHeader = text;
+                activeHeaderIsRed = true;
+                headerDateInfo = { day: parseInt(dateMatch[1]), month: dateMatch[2].toUpperCase() };
+            } else {
+                if (!activeHeaderIsRed) {
+                    activeHeader = text;
+                    headerDateInfo = { day: parseInt(dateMatch[1]), month: dateMatch[2].toUpperCase() };
+                }
             }
-
-            // Зберігаємо попередній блок
-            if (currentBlock && bufferLines.length > 0) {
-                result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
-            }
-
-            const foundDay = parseInt(match[1]);
-            const foundMonth = match[2].toUpperCase();
-
-            bufferLines = [];
-            currentBlock = null;
-
-            if (foundDay === dayToday && foundMonth === monthNameToday) {
-                currentBlock = 'today';
-            } else if (foundDay === dayTomorrow && foundMonth === monthNameTomorrow) {
-                currentBlock = 'tomorrow';
-            }
-
-            // Беремо рядок як є (це буде наш extracted header або інший хороший заголовок)
-            bufferHeader = line;
-            continue;
+            continue; // Йдемо далі, шукати черги
         }
 
-        // Збір черг
-        if (currentBlock) {
-            if (exactQueueRegex.test(line)) {
-                if (line.startsWith("1.1") && bufferLines.length > 0) {
-                      result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
-                      currentBlock = null;
-                      bufferLines = [];
-                      continue;
+        // Б. Перевіряємо, чи це ЧЕРГА (1.1: ...)
+        if (queueRegex.test(text)) {
+            // Фільтруємо дублікати (іноді 1.1 зустрічається двічі)
+            if (text.startsWith("1.1:") && currentQueues.length > 0) {
+                // Це початок нового блоку черг. Зберігаємо старий.
+                if (activeHeader) {
+                    saveBlock(result, activeHeader, currentQueues, headerDateInfo, dayToday, monthNameToday, dayTomorrow, monthNameTomorrow);
                 }
-                bufferLines.push(line);
+                currentQueues = [];
+                // Заголовок залишаємо той самий (він діє на обидва блоки, якщо вони розбиті)
             }
+            currentQueues.push(text);
         }
     }
 
-    if (currentBlock && bufferLines.length > 0) {
-        result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
+    // Зберігаємо останній блок після циклу
+    if (currentQueues.length > 0 && activeHeader) {
+        saveBlock(result, activeHeader, currentQueues, headerDateInfo, dayToday, monthNameToday, dayTomorrow, monthNameTomorrow);
     }
 
     return result;
 }
 
+// Функція збереження результату в today/tomorrow
+function saveBlock(result, header, queues, dateInfo, todayD, todayM, tomD, tomM) {
+    if (!dateInfo) return;
+
+    let targetKey = null;
+    if (dateInfo.day === todayD && dateInfo.month === todayM) targetKey = 'today';
+    else if (dateInfo.day === tomD && dateInfo.month === tomM) targetKey = 'tomorrow';
+
+    if (targetKey) {
+        // Ми завжди перезаписуємо, бо йдемо зверху вниз. 
+        // Останній знайдений графік на сторінці для конкретної дати зазвичай найактуальніший,
+        // АЛЕ на сайті ZOE нові новини зверху. Тому ми перевіряємо:
+        // Якщо ми вже щось записали в 'today', чи варто це міняти? 
+        // У нашому циклі ми йдемо зверху вниз. Отже, ПЕРШИЙ знайдений блок для "сьогодні" - найсвіжіший.
+        // Тому записуємо тільки якщо slot порожній.
+        
+        if (result[targetKey] === null) {
+             result[targetKey] = `⚡️ <b>${header}</b>\n\n${queues.join('\n')}`;
+        }
+    }
+}
+
+// === СКЛАДНА ФУНКЦІЯ: Перетворює HTML в масив рядків, зберігаючи позначку "Це був 24px" ===
+function splitHtmlToLinesWithStyle(html) {
+    // 1. Замінюємо <br> і </p> на унікальний маркер розриву, щоб потім сплітнути
+    let processed = html.replace(/<br\s*\/?>/gi, "||BR||").replace(/<\/p>/gi, "||BR||");
+
+    // 2. Тепер найцікавіше. Нам треба знайти шматки, які всередині <span style="...font-size: 24px...">
+    // Ми зробимо це тимчасовою заміною.
+    
+    // Шукаємо всі входження 24px
+    const styleMarker = "font-size: 24px";
+    let outputLines = [];
+    
+    // Грубий спліт по нашому маркеру
+    let rawLines = processed.split("||BR||");
+
+    for (let raw of rawLines) {
+        // Чистимо від зайвих тегів, щоб отримати текст
+        // Але перед цим перевіряємо, чи є тут наш VIP стиль
+        let isRed = raw.includes(styleMarker);
+
+        // Очищаємо текст
+        let cleanText = raw
+            .replace(/&nbsp;/g, " ")
+            .replace(/<[^>]+>/g, "") // видаляємо всі теги
+            .replace(/\s+/g, " ")    // схлопуємо пробіли
+            .trim();
+
+        if (cleanText.length > 0) {
+            outputLines.push({
+                text: cleanText,
+                isRed: isRed
+            });
+        }
+    }
+    
+    return outputLines;
+}
+
 function normalize(text) {
     if (!text) return "";
     return text.replace(/[^a-zA-Zа-яА-Я0-9]/g, '').toLowerCase();
-}
-
-function convertHtmlToText(html) {
-    let t = html;
-    t = t.replace(/<style([\s\S]*?)<\/style>/gi, "").replace(/<script([\s\S]*?)<\/script>/gi, "");
-    t = t.replace(/<\/(div|p|tr|li|h[1-6])>/gi, "\n");
-    t = t.replace(/<br\s*\/?>/gi, "\n");
-    t = t.replace(/<\/td>/gi, " "); 
-    t = t.replace(/<[^>]+>/g, ""); 
-    t = t.replace(/&nbsp;/g, " ").replace(/&#8211;/g, "-").replace(/&ndash;/g, "-").replace(/&#8217;/g, "'").replace(/&quot;/g, '"');
-    return t.split('\n').map(l => l.trim()).filter(l => l.length > 0).join('\n');
 }
 
 startLoop();
