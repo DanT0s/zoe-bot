@@ -8,7 +8,7 @@ const CHAT_ID = process.env.CHAT_ID;
 const ZOE_PAGE_URL = "https://www.zoe.com.ua/%D0%B3%D1%80%D0%B0%D1%84%D1%96%D0%BA%D0%B8-%D0%BF%D0%BE%D0%B3%D0%BE%D0%B4%D0%B8%D0%BD%D0%BD%D0%B8%D1%85-%D1%81%D1%82%D0%B0%D0%B1%D1%96%D0%BB%D1%96%D0%B7%D0%B0%D1%86%D1%96%D0%B9%D0%BD%D0%B8%D1%85/";
 const SAVE_FILE = 'last_header.txt'; 
 
-// Проверка каждые 2 минуты
+// Перевірка кожні 2 хвилини
 const CHECK_INTERVAL = 120000; 
 const WORK_DURATION = (4 * 60 * 60 * 1000) + (50 * 60 * 1000);
 
@@ -19,32 +19,30 @@ const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 let lastKnownHeader = '';
 
 async function startLoop() {
-    console.log("🚀 ЗАПУСК: Ориентация только на ЗАГОЛОВОК...");
+    console.log("🚀 ЗАПУСК: Режим «Тільки цифри»...");
 
     if (fs.existsSync(SAVE_FILE)) {
         lastKnownHeader = fs.readFileSync(SAVE_FILE, 'utf8').trim();
-        console.log(`📂 В памяти: "${lastKnownHeader}"`);
-    } else {
-        console.log("📂 Память пуста. Первый найденный график будет считаться новым.");
+        console.log(`📂 В пам'яті: "${lastKnownHeader}"`);
     }
 
     const startTime = Date.now();
 
     while (true) {
         if (Date.now() - startTime > WORK_DURATION) {
-            console.log("🛑 Смена окончена.");
+            console.log("🛑 Зміна закінчена.");
             break; 
         }
 
         await checkSchedule();
-        console.log(`⏳ Жду 2 минуты...`);
+        console.log(`⏳ Чекаю 2 хвилини...`);
         await wait(CHECK_INTERVAL);
     }
 }
 
 async function checkSchedule() {
     const timeLabel = new Date().toLocaleTimeString('uk-UA', { timeZone: 'Europe/Kiev' });
-    console.log(`[${timeLabel}] 🔄 Скачиваю...`);
+    console.log(`[${timeLabel}] 🔄 Скачую...`);
     
     try {
         const response = await axios.get(ZOE_PAGE_URL + "?t=" + Date.now(), {
@@ -57,78 +55,83 @@ async function checkSchedule() {
             const html = response.data;
             const plainText = convertHtmlToText(html);
             
-            // Ищем заголовок и "тело" графика
-            const result = findHeaderAndBody(plainText);
+            // Шукаємо чистий графік (Заголовок + тільки цифри)
+            const result = findHeaderAndCleanBody(plainText);
 
             if (result) {
                 const currentHeader = result.header;
-                const fullMessage = result.fullText;
+                const cleanMessage = result.fullText;
 
-                console.log(`🔍 Вижу заголовок на сайте: "${currentHeader}"`);
+                console.log(`🔍 Знайшов графік на: "${currentHeader}"`);
 
-                // СРАВНИВАЕМ ТОЛЬКО ЗАГОЛОВКИ
                 if (normalize(currentHeader) !== normalize(lastKnownHeader)) {
-                    console.log(`🔥 ЗАГОЛОВОК ИЗМЕНИЛСЯ! \nБыло: "${lastKnownHeader}"\nСтало: "${currentHeader}"`);
-                    console.log(`📤 Отправляю сообщение...`);
+                    console.log(`🔥 НОВИЙ ГРАФІК! Відправляю...`);
                     
-                    await bot.sendMessage(CHAT_ID, fullMessage, { parse_mode: 'HTML', disable_web_page_preview: true });
+                    await bot.sendMessage(CHAT_ID, cleanMessage, { parse_mode: 'HTML', disable_web_page_preview: true });
                     
-                    // Обновляем память и файл
                     lastKnownHeader = currentHeader;
                     fs.writeFileSync(SAVE_FILE, currentHeader); 
                 } else {
-                    console.log("💤 Заголовок совпадает с памятью. Молчу.");
+                    console.log("💤 Заголовок не змінився.");
                 }
             } else {
-                console.log("⚠️ Не смог найти строку с датой и словом ГПВ/ГРАФИК.");
-                // Дебаг: показываем первые 5 строк, чтобы понять, что видит бот
-                const debugLines = plainText.split('\n').slice(0, 5);
-                console.log("👀 Первые строки текста:", debugLines);
+                console.log("⚠️ Заголовок не знайдено.");
             }
         }
     } catch (e) {
-        console.log(`❌ Ошибка: ${e.message}`);
+        console.log(`❌ Помилка: ${e.message}`);
     }
 }
 
-// === УПРОЩЕННАЯ ЛОГИКА ===
+// === НОВА ЛОГІКА ФІЛЬТРАЦІЇ ===
 
-function findHeaderAndBody(text) {
+function findHeaderAndCleanBody(text) {
     const lines = text.split('\n');
     
-    // Ищем строку, где есть ДАТА (число + месяц) И слово (ГПВ или ГРАФИК или ОНОВЛЕНО)
-    // Пример: "26 ГРУДНЯ ПО ЗАПОРІЗЬКІЙ ОБЛАСТІ ДІЯТИМУТЬ ГПВ"
+    // Регулярка для заголовка (Дата + ГПВ)
     const headerRegex = /(\d{1,2})[\s\.]+(СІЧНЯ|ЛЮТОГО|БЕРЕЗНЯ|КВІТНЯ|ТРАВНЯ|ЧЕРВНЯ|ЛИПНЯ|СЕРПНЯ|ВЕРЕСНЯ|ЖОВТНЯ|ЛИСТОПАДА|ГРУДНЯ|\d{2}).*(ГПВ|ГРАФІК|ОНОВЛЕНО|ДІЯТИМУТЬ)/i;
+
+    // Регулярка ТІЛЬКИ для черг (1.1, 1.2 ... 6.2)
+    // Шукає рядок, що починається з цифри 1-6, крапки, цифри 1-2
+    const exactQueueRegex = /^\s*[1-6]\.[1-2]/;
 
     let headerIndex = -1;
     let foundHeader = "";
 
-    // 1. Находим строку заголовка
+    // 1. Шукаємо заголовок
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
-        if (line.length < 5) continue;
-
         if (headerRegex.test(line)) {
-            // Игнорируем строку, если это просто ссылка на схему
             if (line.includes("Орієнтовна схема")) continue;
-            
             headerIndex = i;
             foundHeader = line;
-            break; // Берем первый (самый верхний) найденный заголовок
+            break; 
         }
     }
 
-    if (headerIndex === -1) return null; // Заголовок не найден
+    if (headerIndex === -1) return null;
 
-    // 2. Собираем сообщение: Заголовок + следующие 15 строк (чтобы захватить очереди)
-    // Мы просто берем кусок текста после заголовка, не пытаясь его парсить.
-    // Это гарантирует, что мы покажем очереди, даже если формат поменялся.
+    // 2. Збираємо ТІЛЬКИ рядки з чергами, які йдуть після заголовка
+    let cleanLines = [];
     
-    let messageBody = lines.slice(headerIndex + 1, headerIndex + 25) // Берем с запасом 25 строк вниз
-        .filter(l => l.trim().length > 0) // Убираем пустые
-        .join('\n');
+    // Дивимось наступні 50 рядків після заголовка
+    for (let i = headerIndex + 1; i < Math.min(lines.length, headerIndex + 50); i++) {
+        const line = lines[i].trim();
 
-    const fullText = `⚡️ <b>${foundHeader}</b>\n\n${messageBody}`;
+        // Якщо раптом зустріли ІНШУ дату (старий графік знизу) - СТОП
+        if (i > headerIndex + 2 && headerRegex.test(line)) {
+            break; 
+        }
+
+        // БЕРЕМО ТІЛЬКИ ЯКЩО РЯДОК ПОЧИНАЄТЬСЯ НА "1.1", "2.1" і т.д.
+        if (exactQueueRegex.test(line)) {
+            cleanLines.push(line);
+        }
+    }
+
+    if (cleanLines.length === 0) return null; // Якщо черг не знайшли, нічого не шлемо
+
+    const fullText = `⚡️ <b>${foundHeader}</b>\n\n${cleanLines.join('\n')}`;
 
     return {
         header: foundHeader,
@@ -137,7 +140,6 @@ function findHeaderAndBody(text) {
 }
 
 function normalize(text) {
-    // Убираем пробелы и спецсимволы, оставляем только буквы/цифры для сравнения
     return text.replace(/[^a-zA-Zа-яА-Я0-9]/g, '').toLowerCase();
 }
 
@@ -145,21 +147,20 @@ function convertHtmlToText(html) {
     let t = html;
     t = t.replace(/<style([\s\S]*?)<\/style>/gi, "").replace(/<script([\s\S]*?)<\/script>/gi, "");
     
-    // Превращаем блоки в переносы строк
+    // Переносимо рядки
     t = t.replace(/<\/(div|p|tr|li|h[1-6])>/gi, "\n");
     t = t.replace(/<br\s*\/?>/gi, "\n");
-    t = t.replace(/<\/td>/gi, " "); // Ячейки таблицы разделяем пробелом
+    t = t.replace(/<\/td>/gi, " "); 
     
-    t = t.replace(/<[^>]+>/g, ""); // Удаляем теги
+    t = t.replace(/<[^>]+>/g, ""); // Видаляємо теги
     
-    // Чистим мусор
+    // Чистимо спецсимволи
     t = t.replace(/&nbsp;/g, " ")
          .replace(/&#8211;/g, "-")
          .replace(/&ndash;/g, "-")
          .replace(/&#8217;/g, "'")
          .replace(/&quot;/g, '"');
          
-    // Убираем лишние пробелы и пустые строки
     return t.split('\n').map(l => l.trim()).filter(l => l.length > 0).join('\n');
 }
 
