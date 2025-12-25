@@ -20,7 +20,7 @@ const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 let memory = { today: "", tomorrow: "" };
 
 async function startLoop() {
-    console.log("🚀 ЗАПУСК: Парсер с приоритетом на заголовок 24px...");
+    console.log("🚀 ЗАПУСК: Парсер (Точний пошук червоного заголовка)...");
 
     if (fs.existsSync(STATE_FILE)) {
         try {
@@ -59,17 +59,18 @@ async function checkSchedule() {
         if (response.status === 200) {
             const html = response.data;
             
-            // 1. Спочатку чистимо весь текст як зазвичай
+            // 1. Витягуємо саме той червоний заголовок (font-size: 24px)
+            // Це поверне рядок типу: "ОНОВЛЕНО ГПВ НА 25 ГРУДНЯ (оновлено 21-36)"
+            const bigHeader = extractBigHeader(html);
+
+            // 2. Конвертуємо весь інший HTML у текст
             let plainText = convertHtmlToText(html);
 
-            // 2. Спробуємо знайти спец-заголовок (font-size: 24px)
-            const specialHeader = extractBigHeader(html);
-
-            // 3. Якщо знайшли гарний заголовок, додаємо його НА ПОЧАТОК тексту
-            // Це змусить парсер побачити його першим і використати його
-            if (specialHeader) {
-                //console.log(`🎯 Знайдено VIP заголовок: ${specialHeader}`);
-                plainText = specialHeader + "\n" + plainText;
+            // 3. Якщо ми знайшли спец-заголовок, ставимо його НА САМИЙ ПОЧАТОК
+            // Щоб парсер (parseSchedulesByDate) прочитав його першим і взяв з нього дату і текст
+            if (bigHeader) {
+                //console.log(`🎯 Знайдено VIP заголовок: ${bigHeader}`);
+                plainText = bigHeader + "\n" + plainText;
             }
 
             const foundSchedules = parseSchedulesByDate(plainText);
@@ -103,41 +104,42 @@ function saveState() {
     fs.writeFileSync(STATE_FILE, JSON.stringify(memory, null, 2));
 }
 
-// === НОВА ФУНКЦІЯ ДЛЯ ПОШУКУ ЗАГОЛОВКА 24px ===
+// === ФУНКЦІЯ ДЛЯ ВИТЯГУВАННЯ ЧЕРВОНОГО ЗАГОЛОВКА ===
 function extractBigHeader(html) {
-    // Шукаємо span з розміром 24px
-    // Ми беремо шматок HTML починаючи з цього стилю
+    // 1. Шукаємо в HTML код, де починається великий шрифт (як на скріншоті)
     const marker = 'font-size: 24px';
-    const index = html.indexOf(marker);
+    const startIdx = html.indexOf(marker);
     
-    if (index === -1) return null;
+    if (startIdx === -1) return null;
 
-    // Відрізаємо все, що було до цього стилю
-    let substring = html.slice(index);
+    // 2. Знаходимо кінець цього блоку (на скріншоті видно, що це все в <p>, тому шукаємо </p>)
+    // Шукаємо </p> ПОЧИНАЮЧИ з місця, де знайшли маркер
+    const endIdx = html.indexOf('</p>', startIdx);
     
-    // Шукаємо кінець блоку (зазвичай це кінець параграфа </p> або перенос <br>)
-    // На скріншоті це все в <p>, тому шукаємо </p>
-    let endIndex = substring.indexOf('</p>');
-    if (endIndex === -1) endIndex = substring.indexOf('<br'); // на всяк випадок
+    if (endIdx === -1) return null;
 
-    if (endIndex !== -1) {
-        substring = substring.slice(0, endIndex);
+    // 3. Вирізаємо цей шматок брудного HTML
+    let rawFragment = html.substring(startIdx, endIdx);
+
+    // 4. Чистимо його вручну, щоб зберегти "(оновлено...)"
+    // Спочатку видаляємо всі теги
+    let cleanText = rawFragment.replace(/<[^>]+>/g, '');
+    
+    // Замінюємо &nbsp; на пробіли (їх там дуже багато перед "ОНОВЛЕНО")
+    cleanText = cleanText.replace(/&nbsp;/g, ' ');
+    
+    // Прибираємо подвійні пробіли і пробіли по краях
+    cleanText = cleanText.replace(/\s+/g, ' ').trim();
+
+    // Перевірка на адекватність: текст має містити ключові слова
+    if (cleanText.length > 5 && (cleanText.includes("ОНОВЛЕНО") || cleanText.includes("ГПВ"))) {
+        return cleanText;
     }
 
-    // Чистимо отриманий шматок від HTML тегів, щоб отримати чистий текст
-    // Додаємо фіктивний <span> на початок, щоб convertHtmlToText коректно відпрацював, 
-    // бо ми обрізали початок тегу
-    let cleanText = convertHtmlToText('<span style="' + substring);
-    
-    // Прибираємо зайві пробіли
-    cleanText = cleanText.replace(/\s+/g, ' ').trim();
-    
-    if (cleanText.length < 5) return null; // Занадто короткий, мабуть помилка
-
-    return cleanText;
+    return null;
 }
 
-// === РОЗУМНИЙ ПАРСЕР ===
+// === ПАРСЕР ===
 function parseSchedulesByDate(text) {
     const lines = text.split('\n');
     const result = { today: null, tomorrow: null };
@@ -151,7 +153,7 @@ function parseSchedulesByDate(text) {
     const dayTomorrow = uaTomorrow.getDate();
     const monthNameTomorrow = UA_MONTHS[uaTomorrow.getMonth()];
 
-    // Регулярка для дати
+    // Регулярка для дати (шукає "25 ГРУДНЯ" і т.д.)
     const headerRegex = /(\d{1,2})[\s\.]+(СІЧНЯ|ЛЮТОГО|БЕРЕЗНЯ|КВІТНЯ|ТРАВНЯ|ЧЕРВНЯ|ЛИПНЯ|СЕРПНЯ|ВЕРЕСНЯ|ЖОВТНЯ|ЛИСТОПАДА|ГРУДНЯ)/i;
     // Регулярка для черг (1.1 ...)
     const exactQueueRegex = /^\s*[1-6]\.[1-2]/;
@@ -164,17 +166,18 @@ function parseSchedulesByDate(text) {
         const line = lines[i].trim();
         
         // --- ПОШУК ЗАГОЛОВКА ---
+        // Якщо ми вставили bigHeader на початок тексту, цей блок спрацює на ньому першим
         const match = line.match(headerRegex);
         if (match && (line.includes("ГПВ") || line.toUpperCase().includes("ГРАФІК") || line.toUpperCase().includes("ОНОВЛЕНО") || line.toUpperCase().includes("ВІДКЛЮЧЕН"))) {
             
             if (line.includes("Орієнтовна схема")) continue;
 
-            // Зберігаємо попередній блок
+            // Зберігаємо попередній блок, якщо він був
             if (currentBlock && bufferLines.length > 0) {
                 result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
             }
 
-            // Визначаємо дату
+            // Визначаємо дату з рядка
             const foundDay = parseInt(match[1]);
             const foundMonth = match[2].toUpperCase();
 
@@ -182,22 +185,22 @@ function parseSchedulesByDate(text) {
             bufferLines = [];
             currentBlock = null;
 
-            // Визначаємо день (сьогодні/завтра)
+            // Визначаємо до якого дня відноситься цей заголовок
             if (foundDay === dayToday && foundMonth === monthNameToday) {
                 currentBlock = 'today';
             } else if (foundDay === dayTomorrow && foundMonth === monthNameTomorrow) {
                 currentBlock = 'tomorrow';
             }
 
-            // === ЛОГІКА ВИБОРУ ЗАГОЛОВКА ===
-            // Оскільки ми додали specialHeader на початок, він прийде сюди першим.
-            // Він короткий і містить "ОНОВЛЕНО". Ми його беремо.
+            // === ВИБІР ТЕКСТУ ЗАГОЛОВКА ===
+            // Якщо рядок містить "ОНОВЛЕНО" (це наш extracted header), ми беремо його повністю.
+            // Якщо рядок містить "За вказівкою..." або інше сміття — генеруємо стандартний.
             
-            if (line.length > 80 || line.includes("Відповідно") || line.includes("Укренерго")) {
-                // Якщо це довгий нудний текст, генеруємо свій
+            if (line.toUpperCase().includes("ОНОВЛЕНО")) {
+                 bufferHeader = line; // Беремо як є: "ОНОВЛЕНО ГПВ НА 25 ГРУДНЯ (оновлено 21-36)"
+            } else if (line.length > 80 || line.includes("Відповідно") || line.includes("Укренерго")) {
                 bufferHeader = `ГРАФІК ВІДКЛЮЧЕНЬ НА ${foundDay} ${foundMonth}`;
             } else {
-                // Якщо це наш красивий заголовок з сайту (font-size 24)
                 bufferHeader = line;
             }
             continue;
@@ -206,7 +209,7 @@ function parseSchedulesByDate(text) {
         // --- ЗБІР ЧЕРГ ---
         if (currentBlock) {
             if (exactQueueRegex.test(line)) {
-                // Стоп-кран (дублікати)
+                // Стоп-кран (щоб не дублювати черги, якщо вони повторюються)
                 if (line.startsWith("1.1") && bufferLines.length > 0) {
                       result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
                       currentBlock = null;
