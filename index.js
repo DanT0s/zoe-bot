@@ -20,7 +20,7 @@ const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 let memory = { today: "", tomorrow: "" };
 
 async function startLoop() {
-    console.log("🚀 ЗАПУСК: Парсер (Точна копія шапки 24px)...");
+    console.log("🚀 ЗАПУСК: Тільки великі заголовки (без 'За вказівкою')...");
 
     if (fs.existsSync(STATE_FILE)) {
         try {
@@ -59,16 +59,14 @@ async function checkSchedule() {
         if (response.status === 200) {
             const html = response.data;
             
-            // 1. Екстракція ТОЧНОГО тексту червоного заголовка
+            // 1. Знаходимо "Красивий заголовок" (той що 24px)
             const exactHeader = extractBigHeader(html);
             
-            // 2. Отримання звичайного тексту
+            // 2. Отримуємо весь текст
             let plainText = convertHtmlToText(html);
 
-            // 3. Ін'єкція заголовка
-            // Ми додаємо його на самий початок, щоб парсер зчитав дату саме з нього
+            // 3. Ставимо красивий заголовок на самий початок
             if (exactHeader) {
-                // console.log(`🎯 Заголовок для публікації: "${exactHeader}"`);
                 plainText = exactHeader + "\n" + plainText;
             }
 
@@ -103,43 +101,33 @@ function saveState() {
     fs.writeFileSync(STATE_FILE, JSON.stringify(memory, null, 2));
 }
 
-// === ОНОВЛЕНА ФУНКЦІЯ ДЛЯ ВАШОГО HTML ===
+// === ВИТЯГУЄМО ТІЛЬКИ ТЕКСТ З 24px ===
 function extractBigHeader(html) {
-    // 1. Шукаємо початок блоку з шрифтом 24px
+    // Шукаємо стиль розміру шрифту
     const marker = 'font-size: 24px';
     const startIdx = html.indexOf(marker);
     
     if (startIdx === -1) return null;
 
-    // 2. Відрізаємо все що ДО
-    let workingPart = html.substring(startIdx);
-
-    // 3. Шукаємо кінець цього рядка. У вашому HTML після заголовка йде <br />.
-    // Це найважливіший момент: ми беремо все до <br /> або до </p>
-    let endIdx = workingPart.search(/<br\s*\/?>|<\/p>/i);
+    let chunk = html.substring(startIdx);
     
-    if (endIdx === -1) {
-        // Якщо раптом <br> немає, беремо перші 300 символів (страховка)
-        endIdx = 300;
+    // Шукаємо кінець блоку (<br> або </p>)
+    const endIdx = chunk.search(/<br\s*\/?>|<\/p>/i);
+    
+    if (endIdx !== -1) {
+        chunk = chunk.substring(0, endIdx);
+    } else {
+        chunk = chunk.substring(0, 300);
     }
 
-    let rawFragment = workingPart.substring(0, endIdx);
+    // Чистимо
+    chunk = chunk.replace(/&nbsp;/g, ' ');
+    chunk = chunk.replace(/<[^>]+>/g, ' ');
+    let cleanText = chunk.replace(/\s+/g, ' ').trim();
 
-    // 4. Очищення від сміття
-    // Спочатку перетворюємо HTML спецсимволи &nbsp; на пробіли
-    let cleanText = rawFragment.replace(/&nbsp;/g, ' ');
-    
-    // Видаляємо ВСІ теги (<span...>, <strong>, </span> і т.д.)
-    cleanText = cleanText.replace(/<[^>]+>/g, ' ');
-
-    // Прибираємо зайві пробіли (подвійні, табуляції) і обрізаємо краї
-    cleanText = cleanText.replace(/\s+/g, ' ').trim();
-
-    // 5. Перевірка: текст повинен містити "ГПВ" або "ОНОВЛЕНО" або "ГРАФІК"
-    if (cleanText.length > 5 && (cleanText.includes("ОНОВЛЕНО") || cleanText.includes("ГПВ") || cleanText.includes("ГРАФІК"))) {
+    if (cleanText.length > 5) {
         return cleanText;
     }
-
     return null;
 }
 
@@ -157,9 +145,8 @@ function parseSchedulesByDate(text) {
     const dayTomorrow = uaTomorrow.getDate();
     const monthNameTomorrow = UA_MONTHS[uaTomorrow.getMonth()];
 
-    // Регулярка, яка шукає дату (наприклад 26 ГРУДНЯ) будь-де в рядку
+    // Регулярка для дати (будь-де в рядку)
     const dateRegex = /(\d{1,2})[\s\.]+(СІЧНЯ|ЛЮТОГО|БЕРЕЗНЯ|КВІТНЯ|ТРАВНЯ|ЧЕРВНЯ|ЛИПНЯ|СЕРПНЯ|ВЕРЕСНЯ|ЖОВТНЯ|ЛИСТОПАДА|ГРУДНЯ)/i;
-    // Регулярка черг
     const exactQueueRegex = /^\s*[1-6]\.[1-2]/;
 
     let currentBlock = null; 
@@ -170,15 +157,19 @@ function parseSchedulesByDate(text) {
         const line = lines[i].trim();
         if (line.length === 0) continue;
         
-        // Перевіряємо, чи є дата в цьому рядку
         const match = line.match(dateRegex);
         
-        // Це рядок заголовка, якщо в ньому є дата І (ключові слова АБО це наш витягнутий заголовок)
-        if (match && (line.includes("ГПВ") || line.includes("ГРАФІК") || line.includes("ОНОВЛЕНО") || line.includes("ВІДКЛЮЧЕН"))) {
+        // Перевіряємо, чи це рядок заголовка
+        if (match && (line.toUpperCase().includes("ГПВ") || line.toUpperCase().includes("ГРАФІК") || line.toUpperCase().includes("ОНОВЛЕНО") || line.toUpperCase().includes("ВІДКЛЮЧЕН"))) {
             
-            if (line.includes("Орієнтовна схема")) continue;
+            // === ГОЛОВНИЙ ФІЛЬТР ===
+            // Якщо це "адміністративний" текст, ми його ІГНОРУЄМО, навіть якщо там є дата.
+            // Ми хочемо, щоб залишився заголовок, який був знайдений ДО цього (наш injected header).
+            if (line.includes("За вказівкою") || line.includes("Відповідно") || line.includes("Укренерго") || line.includes("Орієнтовна схема")) {
+                continue; 
+            }
 
-            // Зберігаємо старий блок
+            // Зберігаємо попередній блок
             if (currentBlock && bufferLines.length > 0) {
                 result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
             }
@@ -186,34 +177,23 @@ function parseSchedulesByDate(text) {
             const foundDay = parseInt(match[1]);
             const foundMonth = match[2].toUpperCase();
 
-            // Скидання
             bufferLines = [];
             currentBlock = null;
 
-            // Визначення дати
             if (foundDay === dayToday && foundMonth === monthNameToday) {
                 currentBlock = 'today';
             } else if (foundDay === dayTomorrow && foundMonth === monthNameTomorrow) {
                 currentBlock = 'tomorrow';
             }
 
-            // === ЛОГІКА ЗАГОЛОВКА ===
-            // Якщо рядок містить "ОНОВЛЕНО" або "24px" контент - беремо його як є
-            // Якщо рядок занадто довгий і "офіційний" - замінюємо на короткий
-            if (line.includes("ОНОВЛЕНО") || line.includes("(оновлено")) {
-                bufferHeader = line; // Зберігаємо точний текст з сайту!
-            } else if (line.length > 100 || line.includes("Відповідно") || line.includes("Укренерго")) {
-                bufferHeader = `ГРАФІК ВІДКЛЮЧЕНЬ НА ${foundDay} ${foundMonth}`;
-            } else {
-                bufferHeader = line;
-            }
+            // Беремо рядок як є (це буде наш extracted header або інший хороший заголовок)
+            bufferHeader = line;
             continue;
         }
 
-        // --- ЗБІР ЧЕРГ ---
+        // Збір черг
         if (currentBlock) {
             if (exactQueueRegex.test(line)) {
-                // Захист від дублікатів
                 if (line.startsWith("1.1") && bufferLines.length > 0) {
                       result[currentBlock] = `⚡️ <b>${bufferHeader}</b>\n\n${bufferLines.join('\n')}`;
                       currentBlock = null;
